@@ -1,0 +1,15 @@
+## 开场白
+1. 一些问题
+    * Redis的跳跃列表了解吗？有什么缺点？
+    * redis项目中如何使用各种数据？
+    * redis的多路io复用如何理解，为什么单线程还可以抗那么高的qps？
+    * redis的zset的底层实现，(压缩列表和跳表)，这样设计的优缺点。
+2. Redis数据类型的底层数据结构
+    * SDS动态字符串
+    * 双向链表
+    * 压缩列表ziplist
+    * 哈希表hashtable
+    * 跳表skiplist
+    * 整数集合intset
+    * 快速列表quicklist
+    * 紧凑列表listpack
