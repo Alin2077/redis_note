@@ -79,3 +79,97 @@
     * 优点：不会阻塞在内核的等待数据过程，每次发起的IO请求会立即返回，不用阻塞等待，实时性较好
     * 缺点：轮询将会不断地询问内核，这将占用大量的CPU时间，系统资源利用率低，所以一般Web服务器不使用这种IO模型
     * 结论：让Linux内核搞定上述需求，我们将一批文件描述符通过一次系统调用传给内核由内核层去遍历，才能真正解决这个问题。<font color="red">IO多路复用应运而生，即将上述工作直接放进Linux内核，不再两态转换而是直接从内核获得结果，因为内核是非阻塞的</font>
+## IO Multiplexing（IO多路复用）
+1. 是什么？
+    * IO multiplexing 这里面的multiplexing指的其实是在单个线程通过记录跟踪每一个Sock(I/O流)的状态来同时管理多个I/O流，目的是尽量多的提高服务器的吞吐能力
+    * 大家都用过nginx，nginx使用epoll接收请求，nginx会有很多链接进来，epoll会把他们都监视起来，然后像拨开关一样，谁有数据就拨向谁，然后调用相应的代码处理。redis类似
+    * FileDescriptor（文件描述符）
+        * 是计算机科学中的一个术语，是一个用于表达指向文件的引用的抽象化概念
+        * 在形式上是一个非负整数
+        * 实际上，它是一个索引值，指向内核为每一个进程所维护的该进程打开文件的记录表
+        * 当程序打开一个现有文件或者创建一个新文件时，内核向进程返回一个文件描述符
+        * 在程序设计中，一些涉及底层的程序编写往往会围绕着文件描述符展开
+        * 往往只适用于UNIX、Linux这样的操作系统
+    * IO多路复用模型图
+        [IO多路复用模型图](./IO多路复用.png)
+    * IO多路复用概念
+        * 就是我们所说的select、poll、epoll，也可称为event driven IO 事件驱动IO
+        * 就是通过一种机制，一个进程可以监听多个描述符，一旦某个描述符（一般是读就绪或者写就绪），能够通知程序进行相应的读写操作
+        * 可以基于一个阻塞对象并同时在多个描述符上等待就绪，而不是使用多个线程（每一个文件描述符一个线程），这样可以大大节省系统资源。
+        * IO多路复用的特点是<font color="red">通过一种机制一个进程能同时等待多个文件描述符而这些文件描述符（套接字描述符）其中的任意一个进入读就绪状态，select、poll、epoll等函数就可以返回</font>
+2. Redis的IO多路复用
+    * 流程图：
+        [IO多路复用](./Redis的IO多路复用.png)
+    * Reactor模式模型图：
+        [Reactor模型](./Reactor模型.png)
+        1. 指通过一个或多个输入同时传递给服务处理器的服务请求的事件驱动处理模式
+        2. 服务端程序处理传入多路请求，并将它们同步分派给请求对应的处理线程，Reactor模式也叫Dispatcher模式
+        3. <font color="red">IO多路复用统一监听事件，收到后分发（Dispatch给某线程），是编写高性能网络服务的必备技术</font>
+3. select方法
+    * 在linux系统中运行 man select 命令：
+        ```c
+        int select(int nfds,  //监控的文件描述符集合里最大的文件描述符加1
+                     fd_set *readfds, //监控有读数到达文件描述符集合，传入传出参数
+                     fd_set *writefds, //监控写数据到达文件描述符集合，传入传出参数
+                     fd_set *exceptfds,  //监控异常发生到达文件描述符集合，传入传出参数
+                     struct timeval *timeout //定时阻塞监控事件 1.NULL 永远等下去
+                                            // 2.设置timeval，等待固定时间
+                                            // 3.均设置为0，检查描述字后立即返回，轮询
+                     );
+        ```
+    * 优点：select其实就是把NIO中用户态要遍历的fd数组（我们的每一个socket链接，安装进ArrayList里面的那个）拷贝到了内核态，让内核态来遍历，因为用户态判断socket是否有数据还是要调用内核态的，所以拷贝到内核态后，这样遍历判断的时候就不用一直用户态到内核态频繁切换了
+    * 缺点：a.集合使用的bitmap最大1024位，即一个进程最多处理1024个客户端；b.rset不可被重用，每次socket有数据相应的位会被置空；c.文件描述符拷贝到内核态仍然有开销，如果数组很大，那么开销很惊人；
+    d.select并没有通知用户态哪一个socket有数据，仍然需要O(n)的遍历
+4. poll方法：
+    * 在linux系统中运行 man poll 命令：
+        ```c
+         int poll(struct pollfd *fds, //
+                nfds_t nfds, 
+                int timeout);
+         struct pollfd {
+               int   fd;         //文件描述符
+               short events;     //关系的事件，比如读事件或写事件
+               short revents;    //如果该文件描述符有事件发生置为1
+           };
+        ```
+    * poll的执行流程：
+        1. 将五个fd从用户态拷贝到内核态
+        2. poll为阻塞方法，执行poll方法，如果有数据会将fd对应的revents置为POLLIN
+        3. poll方法返回
+        4. 循环遍历，查找哪个fd被置为POLLIN了
+        5. 将revents重置为0，便于复用
+        6. 对置位的fd进行读取和处理
+    * poll解决了select的什么问题？
+        * 解决了bitmap大小限制
+        * 解决了rset不可重用的情况
+5. epoll方法：
+    * 在linux系统中运行 man epoll 命令：    
+        ```c
+        int epoll_create(int size);
+
+        int epoll_ctl(int epfd, //是epoll_create的返回值
+                      int op,   //表示op操作，有EPOLL_CTL_ADD,EPOLL_CTL_DEL,EPOLL_CTL_MOD三种
+                      int fd,   //需要监听的fd
+                      struct epoll_event *event); //告诉内核要监听什么事件
+
+        struct epoll_event{
+            _unit32_t event; //定义的宏，用来表示读或写
+            epoll_data_t data;
+        }
+
+        int epoll_wait(int epfd,struct epoll_event *events,int maxevents,int timeout);
+        ```
+    * 对上面方法的补充：
+        * epoll_create方法的size参数并不限制epoll监听的描述符的最大个数，只是对初始分配内存的一个建议
+        * epoll_wait方法的maxevents用来告知内核这个events有多大
+    * epoll的执行流程：
+        1. 当有数据的时候，会把相应的文件描述符“置位”，但是epoll没有revent标志位，所以并不是真正的置位。这时候会把有数据的文件描述符放到队首
+        2. epoll会返回有数据的文件描述符的个数
+        3. 根据epoll返回的个数读取前N个文件描述符即可
+        4. 读取、处理
+    * 优点：
+        * 一个socket的生命周期中只有一次从用户态拷贝到内核态的过程，开销小
+        * 使用event事件通知机制，每次socket中有数据会主动通知内核，并加入到就绪链表中，不需要遍历所有的socket
+## 五种IO模型总结
+1. 对比图：
+    [对比](./总结.png)
